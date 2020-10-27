@@ -341,7 +341,7 @@ class PI2_Critic(object):
             r += temp_reward
             timer = 0
 
-            while not done[0] or timer < 10:
+            while not done[0] and timer < 10:
                 a = self.sample_action(temp_next_state.reshape([-1, self.s_dim]))
                 timer += 1
                 s_a = np.zeros([1, self.s_dim + self.a_dim])
