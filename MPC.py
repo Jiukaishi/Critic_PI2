@@ -41,15 +41,15 @@ save_model_path = './mpc1023/models.ckpt'
 =========================流程==================================
 self.learn()函数包含一次采样（rollout_train）和一次训练（update）
 rollout_trian函数使用self.pi2_critic函数选取动作，这个函数输入状态，根据actor产生动作，然后使用PI2的方法产生合成动作
-update分为critic update和action update。
+update分为critic update和action update
 """
-
 
 class PI2_Critic(object):
     def __init__(self, a_dim, s_dim, a_bound, env=None, buffer=None):
         self.dynamic_memory = np.zeros((MEMORY_CAPACITY, s_dim + s_dim + a_dim), dtype=np.float32)
         # 1(the last dimension) for reward
         self.num_episodes = NUM_EPISODES
+
         self.minibatch = MINI_BATCH
         self.sample_size = SAMPLE_SIZE
         self.trainfromscratch = TRAIN_FROM_SCRATCH
@@ -62,7 +62,7 @@ class PI2_Critic(object):
         self.alosses = []
         self.dynamic_model = Dynamic_Net(s_dim, a_dim,'dm')
         if buffer == None:
-            self.buffer = Replay_buffer(buffer_size=200)
+            self.buffer = Replay_buffer(buffer_size=500)
         else:
             self.buffer = buffer
         self.a_dim, self.s_dim, self.a_bound = a_dim, s_dim, a_bound,
@@ -91,6 +91,7 @@ class PI2_Critic(object):
         self.atrain = tf.train.AdamOptimizer(LR_A).minimize(self.a_loss, var_list=self.ae_params)
         self.sess.run(tf.global_variables_initializer())
         self.saver = tf.train.Saver()
+        self.rewards = []
         if not self.trainfromscratch:
             self.buffer.load_data()
 
@@ -130,6 +131,7 @@ class PI2_Critic(object):
             returnsum += path_return
             path_number += 1
         avg_return = returnsum / path_number
+        self.rewards.append(avg_return)
         return avg_return, path_number, count
 
     def store_path(self, path, path_return):
@@ -293,24 +295,26 @@ class PI2_Critic(object):
         self.rollout_train(num_episodes=self.num_episodes, max_length=MAX_EP_STEPS)
         self.update()
 
-    def test(self,test_time=3, use_vtrace=False):
+    def test(self,test_time=2, use_vtrace=False):
         # 测试，use_hybrid_action表示是否使用PI2动作
 
         ave_reward = 0
         ave_time = 0
         for i in range(test_time):
+            print('testing')
             total_reward = 0
             obs = self.env.reset()
             done = False
             t = 0
             while (not done) and (t <= MAX_EP_STEPS):
-                # time_start = time.time()
+                #time_start = time.time()
                 act = self.MPC(obs, self.env)
                 new_obs, r, done, _ = self.env.step(act)
                 total_reward += r
                 t += 1
                 obs = new_obs
-                # time_end = time.time()
+               # time_end = time.time()
+               # print(time_end-time_start)
             ave_reward += total_reward
             ave_time += t
         ave_reward = ave_reward / test_time
@@ -337,7 +341,7 @@ class PI2_Critic(object):
             r += temp_reward
             timer = 0
 
-            while not done or timer < 100:
+            while not done[0] or timer < 10:
                 a = self.sample_action(temp_next_state.reshape([-1, self.s_dim]))
                 timer += 1
                 s_a = np.zeros([1, self.s_dim + self.a_dim])
@@ -364,15 +368,17 @@ print("action bound is", a_bound)
 s = env.reset()
 pi2_critic = PI2_Critic(a_dim, s_dim, a_bound, env)
 
-normal_rewards = []
+
 for i in range(50000):
     pi2_critic.learn()
-    if (i+1) % 1== 0:
-        print('======================start testing=========================')
-        r,t = pi2_critic.test(use_vtrace=True)
-        print('==========PI2_Critic ', r,' steps',t,'=============')
-        normal_rewards.append(r)
+    # if (i+1) % 1== 0:
+    #     print('======================start testing=========================')
+    #     r,t = pi2_critic.test(use_vtrace=True)
+    #     print('==========PI2_Critic ', r,' steps',t,'=============')
+    #     normal_rewards.append(r)
+
     if (i+1)%10 == 0:
+        normal_rewards = pi2_critic.rewards
         try:
             print('total interactions:', pi2_critic.buffer.get_total_interactions(), 'total trajectories:',
                   pi2_critic.buffer.get_length())
