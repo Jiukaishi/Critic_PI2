@@ -437,7 +437,7 @@ class PI2_Critic(object):
         #    print('get hybrid action :', time_end - time_start)
         # total_time = time.time() - total_time
         # print('pi2_tradition took ', total_time,' s')
-        print(candidate_actions[-1][0])
+        #print(candidate_actions[-1][0])
         return candidate_actions[-1][0]
 env = gym.make(ENV_NAME)
 env = env.unwrapped
