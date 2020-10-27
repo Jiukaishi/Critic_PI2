@@ -34,7 +34,7 @@ SAMPLE_SIZE = 128  # 训练时采样数，分成minibatch后进行训练
 ENV_NAME = "InvertedDoublePendulum-v1"
 PI2_coefficient = 30
 MINI_BATCH = 1  # 训练的时候的minibatch
-NUM_EPISODES = 2  # 每次rollout_train采样多少条轨迹
+NUM_EPISODES = 1  # 每次rollout_train采样多少条轨迹
 load_model_path = './tra_pi2/models.ckpt'
 save_model_path = './tra_pi2/models.ckpt'
 """
@@ -55,6 +55,7 @@ class PI2_Critic(object):
         self.trainfromscratch = TRAIN_FROM_SCRATCH
         self.sess = tf.Session()
         self.env = copy_env(env)
+        self.rewards = []
         self.reset_env = copy_env(env)
         self.globaltesttime = 0
         self.vtrace_losses = []
@@ -62,7 +63,7 @@ class PI2_Critic(object):
         self.alosses = []
         self.dynamic_model = Dynamic_Net(s_dim, a_dim, 'dm')
         if buffer == None:
-            self.buffer = Replay_buffer(buffer_size=200)
+            self.buffer = Replay_buffer(buffer_size=500)
         else:
             self.buffer = buffer
         self.a_dim, self.s_dim, self.a_bound = a_dim, s_dim, a_bound,
@@ -114,6 +115,7 @@ class PI2_Critic(object):
             t += 1
             obs = new_obs
         print('sample path reward', R)
+
         return path, R
 
     def rollout_train(self, num_episodes=NUM_EPISODES, max_length=None):
@@ -122,14 +124,17 @@ class PI2_Critic(object):
         count = 0
         returnsum = 0
         path_number = 0
+
         while (path_number < num_episodes):
             print('==============Generating Paths==============')
             path, path_return = self.rollout_paths(test=False, max_length=max_length)
+            #ave_r += path_return
             self.store_path(path, path_return)
             count += len(path)
             returnsum += path_return
             path_number += 1
         avg_return = returnsum / path_number
+        self.rewards.append(avg_return)
         return avg_return, path_number, count
 
     def store_path(self, path, path_return):
@@ -286,13 +291,66 @@ class PI2_Critic(object):
             self.alosses.append(aloss)
         return aloss
 
+    def sample_dynamic(self, episodes):
+        episodes_dynamics = []
+        episodes_sactions = []
+        for episode in episodes:
+            # 输入一串episode，该函数会按顺序返回states，actions，reward， probability
+            epi = copy.deepcopy(episode)
+            length = len(epi) - 1
+            s_actions = np.zeros([length, self.s_dim + self.a_dim])
+            dynamics = np.zeros([length, self.s_dim])
+
+            for i in range(length):
+                pair = copy.deepcopy(epi[i])
+                state = pair[:self.s_dim]
+                s_action = pair[:self.s_dim + self.a_dim]
+                next_state = pair[self.s_dim + self.a_dim + 1: self.s_dim + self.a_dim + 1 + self.s_dim]
+                s_actions[i] = s_action
+                dynamics[i] = next_state - state
+                episodes_dynamics.append(copy.deepcopy(dynamics))
+                episodes_sactions.append(copy.deepcopy(s_actions))
+        return episodes_dynamics, episodes_sactions
+
+    def dynamic_training(self, n_sample_size=SAMPLE_SIZE, traintime=DYNAMIC_TRAIN_TIME):
+        minibatch = self.minibatch
+        n_episodes = self.buffer.get_length()
+        if n_sample_size > n_episodes:
+            n_sample_size = n_episodes
+            print("======Warning: buffer size is less than sample size, need to store more data========")
+        #dloss = 0
+        indices = np.random.choice(n_episodes, size=n_sample_size)  # 随机生成序号
+        episodes = []
+        for i in indices:
+            episodes.append(copy.deepcopy(self.buffer.buffer_data[i]))
+        episodes_dynamics, episodes_sactions = self.sample_dynamic(copy.deepcopy(episodes))
+        data_number = len(episodes_dynamics)
+        perm = np.random.permutation(data_number)
+        # Using BGD
+        minibatch = data_number
+        target_sactions = []
+        total_dynamics = []
+        for i in range(0, data_number, minibatch):
+            for j in perm[i:i + minibatch]:
+                for k in range(len(episodes_dynamics[j])):
+                    total_dynamics.append(episodes_dynamics[j][k])
+                    target_sactions.append(episodes_sactions[j][k])
+            target_dynamics = np.array(total_dynamics)
+            target_sactions = np.array(target_sactions)
+        for value_train_times in range(traintime):
+            dloss = self.dynamic_model.learn(target_sactions, target_dynamics)
+            if (value_train_times+1)%33 == 0:
+                #dloss = dloss / value_train_times
+                self.dlosses.append(dloss)
+                print('dynamic is ', dloss)
+        return dloss
 
     def update(self, update_type=2):
         self.actor_training()
+        self.dynamic_training()
 
     def learn(self):
         # 采样+学习
-
         self.rollout_train(num_episodes=self.num_episodes, max_length=MAX_EP_STEPS)
         self.update()
 
@@ -319,14 +377,11 @@ class PI2_Critic(object):
         ave_reward = ave_reward / test_time
         ave_time = ave_time / test_time
         return ave_reward, ave_time
-
-
-
     def pi2_tradition(self, initial_start, env, iteration_times=5):
-        batch_max_value = np.zeros([iteration_times, 2])
+        candidate_actions = []
+        #batch_max_value = np.zeros([iteration_times, 2])
         for i in range(iteration_times):
-            #   initial_time = time.time()
-            envs = [copy_env(env) for j in range(ROLL_OUTS + 1)]  # 复制环境，为计算V(S) = r+v(S_(t+1))做准备
+            #envs = [copy_env(env) for j in range(ROLL_OUTS + 1)]  # 复制环境，为计算V(S) = r+v(S_(t+1))做准备
             if i == 0:
                 initial_action = self.sample_action(
                     initial_start.reshape([-1, s_dim]))  # initial action is supposed to be [action_dim,] narray object
@@ -340,7 +395,6 @@ class PI2_Critic(object):
             #   print('initial took', initial_time, ' s')
             #   calculate_value_time = time.time()
             for j in range(len(action_groups)):
-
                 r = 0
                 a = copy.deepcopy(action_groups[j][0])
                 s_a = np.zeros([1, s_dim + a_dim])
@@ -350,7 +404,8 @@ class PI2_Critic(object):
                 r += temp_reward
                 timer = 0
 
-                while not done or timer < 100:
+                while not done[0] and timer < 100:
+                    print(done[0])
                     a = pi2_critic.sample_action(temp_next_state.reshape([-1, s_dim]))
                     timer += 1
                     s_a = np.zeros([1, s_dim + a_dim])
@@ -376,32 +431,14 @@ class PI2_Critic(object):
                     exponential_value_loss[k] = res
                 probability_weighting[:] = exponential_value_loss[:] / np.sum(exponential_value_loss)  # 计算soft_max概率
             hybrid_action = np.dot(action_groups.T, probability_weighting)
-
-            hybrid_value = 0
-            a = hybrid_action
-            temp_next_state, temp_reward, done, _ = envs[-1].step(a)
-            hybrid_value += temp_reward
-            timer = 0
-            while not done or timer < 100:
-                a = pi2_critic.sample_action(temp_next_state.reshape([-1, s_dim]))
-                temp_next_state, temp_reward, done, _ = envs[-1].step(a)
-                hybrid_value += temp_reward
-                timer+=1
-            if hybrid_value >= maxv:
-                current_action = hybrid_action
-                current_value = hybrid_value
-            else:
-                current_action = action_groups[np.argmax(values)]
-                current_value = maxv
-            batch_max_value[i][0] = copy.deepcopy(current_action)
-            batch_max_value[i][1] = copy.deepcopy(current_value)
+            candidate_actions.append(hybrid_action)
             initial_action = hybrid_action
         #    time_end = time.time()
         #    print('get hybrid action :', time_end - time_start)
-        index = np.argmax(batch_max_value[:, 1], axis=0)
         # total_time = time.time() - total_time
         # print('pi2_tradition took ', total_time,' s')
-        return batch_max_value[index][0]
+        print(candidate_actions[-1][0])
+        return candidate_actions[-1][0]
 env = gym.make(ENV_NAME)
 env = env.unwrapped
 env.seed()
@@ -412,21 +449,19 @@ a_bound = env.action_space.high.shape
 print("action bound is", a_bound)
 s = env.reset()
 pi2_critic = PI2_Critic(a_dim, s_dim, a_bound, env)
-
-normal_rewards = []
-
 # for i in range(10):
 #     pi2_critic.learn()
 # print('Pretraining Finishied')
 for i in range(50000):
     pi2_critic.learn()
-    if (i + 1) % 1 == 0:
-        print('======================start testing=========================')
-        r, t = pi2_critic.test(use_vtrace=True)
-        print('==========PI2_Critic ', r, ' steps', t, '=============')
-        normal_rewards.append(r)
+    # if (i + 1) % 1 == 0:
+    #     print('======================start testing=========================')
+    #     r, t = pi2_critic.test(use_vtrace=True)
+    #     print('==========PI2_Critic ', r, ' steps', t, '=============')
+    #     normal_rewards.append(r)
 
     if (i + 1) % 5 == 0:
+        normal_rewards = pi2_critic.rewards
         try:
             pi2_critic.save_model()
             pi2_critic.buffer.save_data(model_path='./tra_pi2/buffer_data')
